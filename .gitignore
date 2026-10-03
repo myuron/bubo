@@ -1,0 +1,9 @@
+# direnv
+.direnv
+
+# claude
+.claude/settings.local.json
+
+
+# cargo
+target
