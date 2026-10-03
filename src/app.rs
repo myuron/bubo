@@ -13,6 +13,13 @@ pub enum View {
     File { path: PathBuf, content: String },
 }
 
+/// キー入力を受け付けるペイン
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tree,
+    Content,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub tree: Vec<Node>,
@@ -20,8 +27,13 @@ pub struct App {
     /// スクロール位置をフレーム間で保持するためのサイドバーの描画状態
     pub tree_state: ListState,
     pub view: View,
+    pub focus: Focus,
     /// 表示中のファイルを整形した結果と、そのときの幅
     rendered: Option<(u16, Text<'static>)>,
+    /// ファイル表示の先頭に来る行の位置
+    scroll: usize,
+    /// 直近に描画したファイル表示の高さ。ページ単位のスクロール量と末尾の判定に使う
+    viewport_height: u16,
     pub should_quit: bool,
 }
 
@@ -32,7 +44,10 @@ impl App {
             selected: 0,
             tree_state: ListState::default(),
             view: View::Logo,
+            focus: Focus::Tree,
             rendered: None,
+            scroll: 0,
+            viewport_height: 0,
             should_quit: false,
         }
     }
@@ -40,6 +55,24 @@ impl App {
     pub fn handle_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
+            _ => match self.focus {
+                Focus::Tree => self.handle_tree_key(code),
+                Focus::Content => self.handle_content_key(code),
+            },
+        }
+    }
+
+    /// ファイルを表示していないときは、右ペインにフォーカスを移さない
+    fn toggle_focus(&mut self) {
+        self.focus = match (self.focus, &self.view) {
+            (Focus::Tree, View::File { .. }) => Focus::Content,
+            _ => Focus::Tree,
+        };
+    }
+
+    fn handle_tree_key(&mut self, code: KeyCode) {
+        match code {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.selected + 1 < tree::visible(&self.tree).len() {
                     self.selected += 1;
@@ -52,6 +85,16 @@ impl App {
                 self.selected = self.selected.min(len.saturating_sub(1));
             }
             KeyCode::Enter => self.open_selected(),
+            _ => {}
+        }
+    }
+
+    fn handle_content_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
+            KeyCode::PageDown => self.scroll_down(self.viewport_height.into()),
+            KeyCode::PageUp => self.scroll_up(self.viewport_height.into()),
             _ => {}
         }
     }
@@ -74,6 +117,32 @@ impl App {
             .map_or(&[], |(_, text)| text.lines.as_slice())
     }
 
+    /// 幅 `width`・高さ `height` の領域に見えている整形済みの行。
+    /// 幅の変化で行数が減った場合も末尾を越えないよう、ここでスクロール位置を補正する。
+    pub fn file_view(&mut self, width: u16, height: u16) -> &[Line<'static>] {
+        self.viewport_height = height;
+        self.file_lines(width);
+        self.scroll = self.scroll.min(self.max_scroll());
+        let start = self.scroll;
+        let lines = self.file_lines(width);
+        &lines[start..lines.len().min(start + usize::from(height))]
+    }
+
+    /// 最終行が表示の下端に来るときのスクロール位置
+    fn max_scroll(&self) -> usize {
+        self.rendered.as_ref().map_or(0, |(_, text)| {
+            text.lines.len().saturating_sub(self.viewport_height.into())
+        })
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        self.scroll = (self.scroll + amount).min(self.max_scroll());
+    }
+
+    fn scroll_up(&mut self, amount: usize) {
+        self.scroll = self.scroll.saturating_sub(amount);
+    }
+
     fn open_selected(&mut self) {
         let Some(item) = tree::visible(&self.tree).into_iter().nth(self.selected) else {
             return;
@@ -91,6 +160,7 @@ impl App {
             content,
         };
         self.rendered = None;
+        self.scroll = 0;
     }
 }
 
@@ -254,5 +324,144 @@ mod tests {
         app.handle_key(KeyCode::Char('j'));
         app.handle_key(KeyCode::Enter);
         assert_eq!(line_strings(app.file_lines(10))[0], "Guide");
+    }
+
+    /// 10 段落(各 1 行 + 空行)の README を開いた App
+    fn app_with_long_file() -> (TempDir, App) {
+        let (dir, mut app) = setup();
+        let body: Vec<String> = (0..10).map(|i| format!("line{i}")).collect();
+        fs::write(dir.path().join("README.md"), body.join("\n\n")).unwrap();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Enter);
+        (dir, app)
+    }
+
+    #[test]
+    fn file_view_starts_at_top() {
+        let (_dir, mut app) = app_with_long_file();
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line0", "", "line1"]);
+    }
+
+    #[test]
+    fn focus_starts_on_tree() {
+        let (_dir, app) = setup();
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn tab_toggles_focus_when_file_is_open() {
+        let (_dir, mut app) = app_with_long_file();
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Content);
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Tree);
+        app.handle_key(KeyCode::BackTab);
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn tab_keeps_focus_on_tree_while_logo_is_shown() {
+        let (_dir, mut app) = setup();
+        app.handle_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn j_and_k_scroll_file_view_when_content_is_focused() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Down);
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line1", "", "line2"]);
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(line_strings(app.file_view(20, 3)), ["", "line1", ""]);
+        app.handle_key(KeyCode::Up);
+        assert_eq!(line_strings(app.file_view(20, 3))[0], "line0");
+        assert_eq!(app.selected, 1, "scrolling must not move the tree cursor");
+    }
+
+    #[test]
+    fn j_does_not_scroll_file_view_when_tree_is_focused() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::PageDown);
+        assert_eq!(line_strings(app.file_view(20, 3))[0], "line0");
+    }
+
+    #[test]
+    fn space_and_k_do_not_affect_tree_when_content_is_focused() {
+        let (_dir, mut app) = app_with_long_file();
+        // ディレクトリを選んでおき、Space が効けば開いてしまう状態にする
+        app.handle_key(KeyCode::Char('k'));
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char(' '));
+        app.handle_key(KeyCode::Char('j'));
+        assert_eq!(app.selected, 0);
+        assert_eq!(tree::visible(&app.tree).len(), 2);
+    }
+
+    #[test]
+    fn enter_does_not_reopen_file_when_content_is_focused() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        for _ in 0..4 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line2", "", "line3"]);
+    }
+
+    #[test]
+    fn page_keys_scroll_file_view_by_viewport_height() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::PageDown);
+        assert_eq!(line_strings(app.file_view(20, 3)), ["", "line2", ""]);
+        app.handle_key(KeyCode::PageDown);
+        assert_eq!(line_strings(app.file_view(20, 3)), ["line3", "", "line4"]);
+        app.handle_key(KeyCode::PageUp);
+        assert_eq!(line_strings(app.file_view(20, 3)), ["", "line2", ""]);
+    }
+
+    #[test]
+    fn scroll_stops_at_top_and_bottom() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(line_strings(app.file_view(20, 3))[0], "line0");
+        for _ in 0..50 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        // 描画を挟まなくても末尾で止まっているので、1 回戻せばすぐに表示が変わる
+        app.handle_key(KeyCode::Char('k'));
+        assert_eq!(line_strings(app.file_view(20, 3)), ["", "line8", ""]);
+    }
+
+    #[test]
+    fn reopening_file_resets_scroll() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        for _ in 0..4 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        app.handle_key(KeyCode::Tab);
+        // 開き直す先も表示より長いので、末尾へのクランプでは先頭に戻らない
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(line_strings(app.file_view(20, 3))[0], "line0");
+    }
+
+    #[test]
+    fn page_keys_on_logo_do_not_panic() {
+        let (_dir, mut app) = setup();
+        for code in [KeyCode::Tab, KeyCode::PageDown, KeyCode::PageUp] {
+            app.handle_key(code);
+        }
+        assert!(app.file_view(20, 3).is_empty());
     }
 }

@@ -1,13 +1,15 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, List, ListItem, Paragraph};
 
-use crate::app::{App, View};
+use crate::app::{App, Focus, View};
 use crate::logo::LOGO;
 use crate::tree;
 
 const SIDEBAR_WIDTH: u16 = 30;
+/// キー入力を受け付けているペインの枠線の色
+const FOCUSED_BORDER_COLOR: Color = Color::Cyan;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [sidebar, main] =
@@ -21,15 +23,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let block = Block::bordered().title(title);
+            let block = pane_block(app.focus == Focus::Content).title(title);
             let inner = block.inner(main);
             // 整形済みの行のうち、見えている範囲だけを複製して描画する
-            let lines: Vec<_> = app
-                .file_lines(inner.width)
-                .iter()
-                .take(inner.height as usize)
-                .cloned()
-                .collect();
+            let lines = app.file_view(inner.width, inner.height).to_vec();
             frame.render_widget(Paragraph::new(lines).block(block), main);
         }
     }
@@ -49,10 +46,20 @@ fn draw_tree(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let list = List::new(items)
-        .block(Block::bordered().title("Files"))
+        .block(pane_block(app.focus == Focus::Tree).title("Files"))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     app.tree_state.select(Some(app.selected));
     frame.render_stateful_widget(list, area, &mut app.tree_state);
+}
+
+/// フォーカス中かどうかで枠線の色を変えたペインの枠
+fn pane_block(focused: bool) -> Block<'static> {
+    let block = Block::bordered();
+    if focused {
+        block.border_style(Style::new().fg(FOCUSED_BORDER_COLOR))
+    } else {
+        block
+    }
 }
 
 /// 各行の左端を揃えたまま、ロゴ全体を領域の中央に配置する。
@@ -190,6 +197,53 @@ mod tests {
             rows[4].contains("│• item"),
             "unexpected item row: {}",
             rows[4]
+        );
+    }
+
+    #[test]
+    fn scrolls_file_content_with_j_after_tab() {
+        let (dir, mut app) = app_with_files();
+        let body: Vec<String> = (0..40).map(|i| format!("para{i:02}")).collect();
+        fs::write(dir.path().join("README.md"), body.join("\n\n")).unwrap();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Enter);
+        let mut terminal = new_terminal();
+        let screen = render(&mut terminal, &mut app);
+        assert!(screen.contains("│para00"));
+        app.handle_key(KeyCode::Tab);
+        for _ in 0..4 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        let screen = render(&mut terminal, &mut app);
+        let first_row = screen.lines().nth(1).unwrap();
+        assert!(
+            first_row.contains("│para02"),
+            "unexpected first row: {first_row}"
+        );
+    }
+
+    /// 左ペインと右ペインの左上の枠線の色
+    fn border_colors(terminal: &Terminal<TestBackend>) -> (Color, Color) {
+        let buffer = terminal.backend().buffer();
+        (buffer[(0, 0)].fg, buffer[(SIDEBAR_WIDTH, 0)].fg)
+    }
+
+    #[test]
+    fn highlights_border_of_focused_pane() {
+        let (_dir, mut app) = app_with_files();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Enter);
+        let mut terminal = new_terminal();
+        render(&mut terminal, &mut app);
+        assert_eq!(
+            border_colors(&terminal),
+            (FOCUSED_BORDER_COLOR, Color::Reset)
+        );
+        app.handle_key(KeyCode::Tab);
+        render(&mut terminal, &mut app);
+        assert_eq!(
+            border_colors(&terminal),
+            (Color::Reset, FOCUSED_BORDER_COLOR)
         );
     }
 }
