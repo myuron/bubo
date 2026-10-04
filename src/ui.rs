@@ -1,7 +1,9 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, List, ListItem, Paragraph};
+use ratatui::widgets::{
+    Block, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use crate::app::{App, Focus, View};
 use crate::logo::LOGO;
@@ -10,6 +12,8 @@ use crate::tree;
 const SIDEBAR_WIDTH: u16 = 30;
 /// キー入力を受け付けているペインの枠線の色
 const FOCUSED_BORDER_COLOR: Color = Color::Cyan;
+/// 右ペインの枠線上に重ねて描くスクロールバーのつまみ
+const SCROLLBAR_THUMB: &str = "█";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [sidebar, main] =
@@ -28,8 +32,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // 整形済みの行のうち、見えている範囲だけを複製して描画する
             let lines = app.file_view(inner.width, inner.height).to_vec();
             frame.render_widget(Paragraph::new(lines).block(block), main);
+            draw_scrollbar(frame, app, main);
         }
     }
+}
+
+/// 右ペインの右側の枠線にスクロールバーを重ねる。全体が収まっているときは描かない。
+fn draw_scrollbar(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(metrics) = app.scroll_metrics() else {
+        return;
+    };
+    // 上下の角を避け、右側の枠線の縦棒の範囲だけに描く
+    let track = area.inner(Margin::new(0, 1));
+    // 位置の取りうる範囲(0..=max_scroll)と表示の高さを渡すと、
+    // つまみの長さと位置が全体の行数に対する比率になる
+    let mut state = ScrollbarState::new(metrics.max_scroll + 1)
+        .position(metrics.position)
+        .viewport_content_length(track.height.into());
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_symbol(SCROLLBAR_THUMB);
+    frame.render_stateful_widget(scrollbar, track, &mut state);
 }
 
 fn draw_tree(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -220,6 +245,52 @@ mod tests {
             first_row.contains("│para02"),
             "unexpected first row: {first_row}"
         );
+    }
+
+    /// 右ペインの右端の列(枠線の位置)を、上下の角を除いて返す
+    fn right_border_column(screen: &str) -> Vec<String> {
+        let rows: Vec<&str> = screen.lines().collect();
+        rows[1..rows.len() - 1]
+            .iter()
+            .map(|row| row.chars().last().unwrap().to_string())
+            .collect()
+    }
+
+    fn open_long_readme() -> (tempfile::TempDir, App) {
+        let (dir, mut app) = app_with_files();
+        let body: Vec<String> = (0..40).map(|i| format!("para{i:02}")).collect();
+        fs::write(dir.path().join("README.md"), body.join("\n\n")).unwrap();
+        app.handle_key(KeyCode::Char('j'));
+        app.handle_key(KeyCode::Enter);
+        (dir, app)
+    }
+
+    #[test]
+    fn shows_scrollbar_thumb_at_top_for_long_file() {
+        let (_dir, mut app) = open_long_readme();
+        let column = right_border_column(&render(&mut new_terminal(), &mut app));
+        assert_eq!(column[0], SCROLLBAR_THUMB);
+        assert_eq!(column.last().unwrap(), "│");
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_bottom_at_end_of_file() {
+        let (_dir, mut app) = open_long_readme();
+        let mut terminal = new_terminal();
+        render(&mut terminal, &mut app);
+        app.handle_key(KeyCode::Tab);
+        for _ in 0..100 {
+            app.handle_key(KeyCode::Char('j'));
+        }
+        let column = right_border_column(&render(&mut terminal, &mut app));
+        assert_eq!(column[0], "│");
+        assert_eq!(column.last().unwrap(), SCROLLBAR_THUMB);
+    }
+
+    #[test]
+    fn hides_scrollbar_when_file_fits() {
+        let screen = render_readme("short");
+        assert!(right_border_column(&screen).iter().all(|cell| cell == "│"));
     }
 
     /// 左ペインと右ペインの左上の枠線の色

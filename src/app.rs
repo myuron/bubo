@@ -20,6 +20,13 @@ pub enum Focus {
     Content,
 }
 
+/// ファイル表示のスクロール位置。スクロールバーの描画に使う
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollMetrics {
+    pub position: usize,
+    pub max_scroll: usize,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub tree: Vec<Node>,
@@ -126,6 +133,15 @@ impl App {
         let start = self.scroll;
         let lines = self.file_lines(width);
         &lines[start..lines.len().min(start + usize::from(height))]
+    }
+
+    /// 直近に描画したファイル表示のスクロール位置。全体が収まっていてスクロールできないときは `None`
+    pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let max_scroll = self.max_scroll();
+        (max_scroll > 0).then_some(ScrollMetrics {
+            position: self.scroll,
+            max_scroll,
+        })
     }
 
     /// 最終行が表示の下端に来るときのスクロール位置
@@ -454,6 +470,36 @@ mod tests {
         // 開き直す先も表示より長いので、末尾へのクランプでは先頭に戻らない
         app.handle_key(KeyCode::Enter);
         assert_eq!(line_strings(app.file_view(20, 3))[0], "line0");
+    }
+
+    #[test]
+    fn scroll_metrics_is_none_when_content_fits() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 30);
+        assert_eq!(app.scroll_metrics(), None);
+    }
+
+    #[test]
+    fn scroll_metrics_is_none_for_logo() {
+        let (_dir, mut app) = setup();
+        app.file_view(20, 3);
+        assert_eq!(app.scroll_metrics(), None);
+    }
+
+    #[test]
+    fn scroll_metrics_reports_position_and_max_scroll() {
+        let (_dir, mut app) = app_with_long_file();
+        app.file_view(20, 3);
+        app.handle_key(KeyCode::Tab);
+        app.handle_key(KeyCode::Char('j'));
+        // 19 行を高さ 3 で表示するので、スクロール位置は 0..=16
+        assert_eq!(
+            app.scroll_metrics(),
+            Some(ScrollMetrics {
+                position: 1,
+                max_scroll: 16
+            })
+        );
     }
 
     #[test]
